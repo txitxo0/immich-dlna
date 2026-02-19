@@ -50,6 +50,7 @@ class ContentDirectoryService:
         browse_flag = child_text(action_element, "BrowseFlag", "BrowseDirectChildren")
         starting_index = _parse_non_negative_int(child_text(action_element, "StartingIndex", "0"))
         requested_count = _parse_non_negative_int(child_text(action_element, "RequestedCount", "0"))
+        sort_criteria = child_text(action_element, "SortCriteria", "")
         if requested_count == 0:
             requested_count = 50
 
@@ -63,6 +64,7 @@ class ContentDirectoryService:
                 browse_flag=browse_flag,
                 starting_index=starting_index,
                 requested_count=requested_count,
+                sort_criteria=sort_criteria,
             )
         except ImmichError as error:
             self.logger.error("Browse failed object_id=%s browse_flag=%s error=%s", object_id, browse_flag, error)

@@ -121,18 +121,22 @@ class ImmichClient:
         self._album_list_cache.set("albums", albums)
         return albums
 
-    async def get_album_assets(self, album_id: str) -> list[ImmichAsset]:
+    async def get_album_assets(self, album_id: str, sort_criteria: str = "") -> list[ImmichAsset]:
         cache_key = f"album:{album_id}"
         cached = self._album_assets_cache.get(cache_key)
-        if cached is not None:
+        if cached is not None and not sort_criteria:
             return cached
 
         payload = await self._request_json(f"/albums/{album_id}", params={"withoutAssets": "false"})
         assets_payload = payload.get("assets", [])
         assets = [self._parse_asset(asset_payload) for asset_payload in assets_payload]
+        album_order = str(payload.get("order", "")).strip().lower()
+        if not sort_criteria and album_order in {"asc", "desc"}:
+            assets.sort(key=lambda asset: asset.created_at, reverse=album_order == "desc")
         for asset in assets:
             self._asset_cache.set(f"asset:{asset.asset_id}", asset)
-        self._album_assets_cache.set(cache_key, assets)
+        if not sort_criteria:
+            self._album_assets_cache.set(cache_key, assets)
         return assets
 
     async def list_timeline_asset_refs(self) -> list[tuple[str, bool]]:

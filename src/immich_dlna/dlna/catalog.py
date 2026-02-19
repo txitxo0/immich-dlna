@@ -37,6 +37,7 @@ class ContentCatalog:
         browse_flag: str,
         starting_index: int,
         requested_count: int,
+        sort_criteria: str = "",
     ) -> tuple[list[BrowseEntry], int]:
         try:
             if browse_flag == "BrowseDirectChildren" and object_id in {TIMELINE_ID, "1"}:
@@ -46,7 +47,7 @@ class ContentCatalog:
                 entry = await self._browse_metadata(object_id)
                 all_entries = [entry] if entry is not None else []
             else:
-                all_entries = await self._browse_children(object_id)
+                all_entries = await self._browse_children(object_id, sort_criteria=sort_criteria)
         except ImmichError as error:
             if object_id in {ROOT_ID, TIMELINE_ID, ALBUMS_ID} or object_id.startswith("album:"):
                 self.logger.error("Immich browse fallback object_id=%s error=%s", object_id, error)
@@ -91,7 +92,7 @@ class ContentCatalog:
 
         return None
 
-    async def _browse_children(self, object_id: str) -> list[BrowseEntry]:
+    async def _browse_children(self, object_id: str, sort_criteria: str = "") -> list[BrowseEntry]:
         if object_id == "1":
             object_id = TIMELINE_ID
         if object_id == "2":
@@ -117,7 +118,7 @@ class ContentCatalog:
 
         album_id = parse_album_id(object_id)
         if album_id is not None:
-            assets = await self.immich_client.get_album_assets(album_id)
+            assets = await self.immich_client.get_album_assets(album_id, sort_criteria=sort_criteria)
             parent_id = album_object_id(album_id)
             return [self._to_media_item(asset, parent_id) for asset in assets]
 
