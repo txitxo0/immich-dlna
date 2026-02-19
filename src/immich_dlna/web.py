@@ -10,6 +10,7 @@ from immich_dlna.dlna.content_directory import ContentDirectoryService
 from immich_dlna.dlna.device_description import build_device_description
 from immich_dlna.dlna.scpd import CONNECTION_MANAGER_SCPD, CONTENT_DIRECTORY_SCPD
 from immich_dlna.dlna.soap import extract_action_from_soap_header, parse_action_request
+from immich_dlna.immich import ImmichClient, ImmichError
 
 
 def _soap_response(status_code: int, payload: str) -> web.Response:
@@ -20,12 +21,13 @@ def create_app(
     settings: Settings,
     content_directory_service: ContentDirectoryService,
     connection_manager_service: ConnectionManagerService,
+    immich_client: ImmichClient,
 ) -> web.Application:
     app = web.Application()
     logger = logging.getLogger("immich_dlna.http")
 
     async def health(_request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "phase": 1})
+        return web.json_response({"status": "ok", "phase": 2})
 
     async def device_xml(request: web.Request) -> web.Response:
         logger.info("Device description requested remote=%s", request.remote)
@@ -65,7 +67,7 @@ def create_app(
                 return web.Response(status=400, text="Malformed SOAP request.")
 
         logger.info("ContentDirectory action=%s remote=%s", action, request.remote)
-        status_code, payload = content_directory_service.handle(action, body)
+        status_code, payload = await content_directory_service.handle(action, body)
         return _soap_response(status_code, payload)
 
     async def connection_manager_control(request: web.Request) -> web.Response:
@@ -82,6 +84,51 @@ def create_app(
         status_code, payload = connection_manager_service.handle(action)
         return _soap_response(status_code, payload)
 
+    async def media_asset(request: web.Request) -> web.StreamResponse:
+        asset_id = request.match_info.get("asset_id", "")
+        range_header = request.headers.get("Range")
+        logger.info("Media proxy request asset_id=%s remote=%s has_range=%s", asset_id, request.remote, bool(range_header))
+
+        try:
+            asset, upstream = await immich_client.open_asset_stream(asset_id, range_header)
+        except ImmichError as error:
+            logger.error("Media proxy failed before stream asset_id=%s error=%s", asset_id, error)
+            return web.Response(status=502, text="Failed to fetch media from Immich.")
+
+        passthrough_headers = {}
+        for header_name in (
+            "Content-Type",
+            "Content-Length",
+            "Content-Range",
+            "Accept-Ranges",
+            "ETag",
+            "Last-Modified",
+            "Cache-Control",
+        ):
+            value = upstream.headers.get(header_name)
+            if value:
+                passthrough_headers[header_name] = value
+
+        if "Content-Type" not in passthrough_headers:
+            passthrough_headers["Content-Type"] = asset.original_mime_type
+
+        response = web.StreamResponse(status=upstream.status, headers=passthrough_headers)
+        await response.prepare(request)
+
+        try:
+            async for chunk in upstream.content.iter_chunked(64 * 1024):
+                await response.write(chunk)
+        except (ConnectionResetError, RuntimeError) as error:
+            logger.warning("Client disconnected during stream asset_id=%s error=%s", asset_id, error)
+        finally:
+            upstream.release()
+
+        try:
+            await response.write_eof()
+        except (ConnectionResetError, RuntimeError):
+            pass
+        return response
+
     app.router.add_get("/health", health)
     app.router.add_get("/device.xml", device_xml)
     app.router.add_get("/ContentDirectory/scpd.xml", content_directory_scpd)
@@ -90,4 +137,5 @@ def create_app(
     app.router.add_get("/ConnectionManager/scpd.xml", connection_manager_scpd)
     app.router.add_post("/ConnectionManager/control", connection_manager_control)
     app.router.add_route("*", "/ConnectionManager/event", event_subscription)
+    app.router.add_get("/media/asset/{asset_id}", media_asset)
     return app

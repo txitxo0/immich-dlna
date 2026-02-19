@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import socket
+from urllib.parse import urlsplit, urlunsplit
 import uuid
 
 
@@ -14,6 +15,40 @@ def _read_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as error:
         raise ValueError(f"Environment variable {name} must be an integer, got: {value}") from error
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Environment variable {name} must be a boolean, got: {value}")
+
+
+def _read_required_str(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ValueError(f"Environment variable {name} is required.")
+    return value
+
+
+def _normalize_immich_url(raw_url: str) -> str:
+    normalized = raw_url.rstrip("/")
+    parsed = urlsplit(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return normalized
+
+    path = parsed.path or ""
+    if path in {"", "/"}:
+        path = "/api"
+    else:
+        path = path.rstrip("/")
+
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _default_base_url(port: int) -> str:
@@ -44,12 +79,19 @@ class Settings:
     ssdp_port: int
     ssdp_max_age: int
     ssdp_notify_interval: int
+    immich_url: str
+    immich_api_token: str
+    immich_verify_ssl: bool
+    immich_timeout_seconds: int
+    metadata_cache_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
         http_port = _read_int("IMMICH_DLNA_HTTP_PORT", 8200)
         ssdp_max_age = _read_int("IMMICH_DLNA_SSDP_MAX_AGE", 1800)
         ssdp_notify_interval = _read_int("IMMICH_DLNA_SSDP_NOTIFY_INTERVAL", 900)
+        immich_timeout_seconds = _read_int("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS", 20)
+        metadata_cache_ttl_seconds = _read_int("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS", 30)
 
         if ssdp_notify_interval <= 0:
             raise ValueError("IMMICH_DLNA_SSDP_NOTIFY_INTERVAL must be > 0.")
@@ -59,6 +101,10 @@ class Settings:
             raise ValueError(
                 "IMMICH_DLNA_SSDP_NOTIFY_INTERVAL must be <= IMMICH_DLNA_SSDP_MAX_AGE."
             )
+        if immich_timeout_seconds <= 0:
+            raise ValueError("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS must be > 0.")
+        if metadata_cache_ttl_seconds <= 0:
+            raise ValueError("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS must be > 0.")
 
         return cls(
             http_host=os.getenv("IMMICH_DLNA_HTTP_HOST", "0.0.0.0"),
@@ -71,4 +117,9 @@ class Settings:
             ssdp_port=_read_int("IMMICH_DLNA_SSDP_PORT", 1900),
             ssdp_max_age=ssdp_max_age,
             ssdp_notify_interval=ssdp_notify_interval,
+            immich_url=_normalize_immich_url(_read_required_str("IMMICH_URL")),
+            immich_api_token=_read_required_str("IMMICH_API_TOKEN"),
+            immich_verify_ssl=_read_bool("IMMICH_VERIFY_SSL", False),
+            immich_timeout_seconds=immich_timeout_seconds,
+            metadata_cache_ttl_seconds=metadata_cache_ttl_seconds,
         )

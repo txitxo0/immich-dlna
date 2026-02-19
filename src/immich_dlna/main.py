@@ -8,15 +8,17 @@ import signal
 from aiohttp import web
 
 from immich_dlna.config import Settings
+from immich_dlna.dlna.catalog import ContentCatalog
 from immich_dlna.dlna.connection_manager import ConnectionManagerService
 from immich_dlna.dlna.content_directory import ContentDirectoryService
+from immich_dlna.immich import ImmichClient
 from immich_dlna.logging_config import configure_logging
 from immich_dlna.ssdp import SsdpServer
 from immich_dlna.web import create_app
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Immich-DLNA Phase 1 server")
+    parser = argparse.ArgumentParser(description="Immich-DLNA server")
     parser.add_argument(
         "--check-config",
         action="store_true",
@@ -27,18 +29,24 @@ def parse_args() -> argparse.Namespace:
 
 async def run_server(settings: Settings) -> None:
     logger = logging.getLogger("immich_dlna.main")
-    content_directory = ContentDirectoryService()
+    immich_client = ImmichClient(settings)
+    catalog = ContentCatalog(settings=settings, immich_client=immich_client)
+    content_directory = ContentDirectoryService(catalog=catalog)
     connection_manager = ConnectionManagerService()
     ssdp_server = SsdpServer(settings)
-    app = create_app(settings, content_directory, connection_manager)
+    app = create_app(settings, content_directory, connection_manager, immich_client)
 
     async def on_startup(_app: web.Application) -> None:
+        await immich_client.start()
+        logger.info("Immich client started")
         await ssdp_server.start()
         logger.info("SSDP started")
 
     async def on_cleanup(_app: web.Application) -> None:
         await ssdp_server.stop()
         logger.info("SSDP stopped")
+        await immich_client.close()
+        logger.info("Immich client stopped")
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
