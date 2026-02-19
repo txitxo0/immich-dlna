@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Generic, TypeVar
@@ -14,9 +15,12 @@ class _CachedValue(Generic[T]):
 
 
 class TtlCache(Generic[T]):
-    def __init__(self, ttl_seconds: int) -> None:
+    def __init__(self, ttl_seconds: int, max_size: int) -> None:
+        if max_size <= 0:
+            raise ValueError("max_size must be > 0")
         self._ttl = timedelta(seconds=ttl_seconds)
-        self._values: dict[str, _CachedValue[T]] = {}
+        self._max_size = max_size
+        self._values: OrderedDict[str, _CachedValue[T]] = OrderedDict()
         self._hits = 0
         self._misses = 0
 
@@ -31,6 +35,7 @@ class TtlCache(Generic[T]):
             self._misses += 1
             return None
         self._hits += 1
+        self._values.move_to_end(key)
         return item.value
 
     def set(self, key: str, value: T) -> None:
@@ -38,6 +43,9 @@ class TtlCache(Generic[T]):
             expires_at=datetime.now(timezone.utc) + self._ttl,
             value=value,
         )
+        self._values.move_to_end(key)
+        if len(self._values) > self._max_size:
+            self._values.popitem(last=False)
 
     @property
     def hits(self) -> int:

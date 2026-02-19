@@ -46,21 +46,38 @@ class ImmichClient:
         self.metrics = metrics
         self.logger = logging.getLogger("immich_dlna.immich")
         self._session: aiohttp.ClientSession | None = None
-        self._asset_cache = TtlCache[ImmichAsset](settings.metadata_cache_ttl_seconds)
-        self._album_list_cache = TtlCache[list[ImmichAlbum]](settings.metadata_cache_ttl_seconds)
-        self._album_assets_cache = TtlCache[list[ImmichAsset]](settings.metadata_cache_ttl_seconds)
-        self._timeline_refs_cache = TtlCache[list[tuple[str, bool]]](settings.metadata_cache_ttl_seconds)
+        self._asset_cache = TtlCache[ImmichAsset](
+            settings.metadata_cache_ttl_seconds,
+            settings.metadata_cache_max_entries,
+        )
+        self._album_list_cache = TtlCache[list[ImmichAlbum]](
+            settings.metadata_cache_ttl_seconds,
+            settings.metadata_cache_max_entries,
+        )
+        self._album_assets_cache = TtlCache[list[ImmichAsset]](
+            settings.metadata_cache_ttl_seconds,
+            settings.metadata_cache_max_entries,
+        )
+        self._timeline_refs_cache = TtlCache[list[tuple[str, bool]]](
+            settings.metadata_cache_ttl_seconds,
+            settings.metadata_cache_max_entries,
+        )
         self._ssl: bool | None = None if settings.immich_verify_ssl else False
 
     async def start(self) -> None:
         if self._session is not None:
             return
         timeout = aiohttp.ClientTimeout(total=self.settings.immich_timeout_seconds)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        connector = aiohttp.TCPConnector(
+            limit=self.settings.immich_max_concurrent_requests,
+            limit_per_host=self.settings.immich_max_concurrent_requests,
+        )
+        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         self.logger.info(
-            "Immich client started url=%s verify_ssl=%s",
+            "Immich client started url=%s verify_ssl=%s max_concurrent_requests=%s",
             self.settings.immich_url,
             self.settings.immich_verify_ssl,
+            self.settings.immich_max_concurrent_requests,
         )
 
     async def close(self) -> None:

@@ -84,6 +84,8 @@ class Settings:
     immich_verify_ssl: bool
     immich_timeout_seconds: int
     metadata_cache_ttl_seconds: int
+    metadata_cache_max_entries: int
+    immich_max_concurrent_requests: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -92,6 +94,8 @@ class Settings:
         ssdp_notify_interval = _read_int("IMMICH_DLNA_SSDP_NOTIFY_INTERVAL", 900)
         immich_timeout_seconds = _read_int("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS", 20)
         metadata_cache_ttl_seconds = _read_int("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS", 30)
+        metadata_cache_max_entries = _read_int("IMMICH_DLNA_METADATA_CACHE_MAX_ENTRIES", 2000)
+        immich_max_concurrent_requests = _read_int("IMMICH_DLNA_IMMICH_MAX_CONCURRENT_REQUESTS", 16)
 
         if ssdp_notify_interval <= 0:
             raise ValueError("IMMICH_DLNA_SSDP_NOTIFY_INTERVAL must be > 0.")
@@ -105,6 +109,10 @@ class Settings:
             raise ValueError("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS must be > 0.")
         if metadata_cache_ttl_seconds <= 0:
             raise ValueError("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS must be > 0.")
+        if metadata_cache_max_entries <= 0:
+            raise ValueError("IMMICH_DLNA_METADATA_CACHE_MAX_ENTRIES must be > 0.")
+        if immich_max_concurrent_requests <= 0:
+            raise ValueError("IMMICH_DLNA_IMMICH_MAX_CONCURRENT_REQUESTS must be > 0.")
 
         return cls(
             http_host=os.getenv("IMMICH_DLNA_HTTP_HOST", "0.0.0.0"),
@@ -122,4 +130,6 @@ class Settings:
             immich_verify_ssl=_read_bool("IMMICH_VERIFY_SSL", True),
             immich_timeout_seconds=immich_timeout_seconds,
             metadata_cache_ttl_seconds=metadata_cache_ttl_seconds,
+            metadata_cache_max_entries=metadata_cache_max_entries,
+            immich_max_concurrent_requests=immich_max_concurrent_requests,
         )
