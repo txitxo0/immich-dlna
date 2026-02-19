@@ -102,17 +102,22 @@ class ImmichClient:
         if cached is not None:
             return cached
 
-        payload = await self._request_json("/albums")
-        albums: list[ImmichAlbum] = []
-        for album in payload:
-            albums.append(
-                ImmichAlbum(
+        owned_payload = await self._request_json("/albums")
+        shared_payload = await self._request_json("/albums", params={"shared": "true"})
+
+        albums_by_id: dict[str, ImmichAlbum] = {}
+        for payload in (owned_payload, shared_payload):
+            for album in payload:
+                parsed_album = ImmichAlbum(
                     album_id=str(album.get("id", "")),
                     name=str(album.get("albumName", "Album")),
                     created_at=str(album.get("createdAt", "")),
                     asset_count=int(album.get("assetCount", 0)),
                 )
-            )
+                if parsed_album.album_id:
+                    albums_by_id[parsed_album.album_id] = parsed_album
+
+        albums = list(albums_by_id.values())
         self._album_list_cache.set("albums", albums)
         return albums
 
@@ -137,7 +142,12 @@ class ImmichClient:
 
         bucket_payload = await self._request_json(
             "/timeline/buckets",
-            params={"order": "desc", "visibility": "timeline", "isTrashed": "false"},
+            params={
+                "order": "desc",
+                "visibility": "timeline",
+                "isTrashed": "false",
+                "withPartners": "true",
+            },
         )
 
         refs: list[tuple[str, bool]] = []
@@ -152,6 +162,7 @@ class ImmichClient:
                     "order": "desc",
                     "visibility": "timeline",
                     "isTrashed": "false",
+                    "withPartners": "true",
                 },
             )
             ids = assets_payload.get("id", [])
