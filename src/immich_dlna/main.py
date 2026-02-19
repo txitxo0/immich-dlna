@@ -13,6 +13,7 @@ from immich_dlna.dlna.connection_manager import ConnectionManagerService
 from immich_dlna.dlna.content_directory import ContentDirectoryService
 from immich_dlna.immich import ImmichClient
 from immich_dlna.logging_config import configure_logging
+from immich_dlna.metrics import MetricsRegistry
 from immich_dlna.ssdp import SsdpServer
 from immich_dlna.web import create_app
 
@@ -29,12 +30,13 @@ def parse_args() -> argparse.Namespace:
 
 async def run_server(settings: Settings) -> None:
     logger = logging.getLogger("immich_dlna.main")
-    immich_client = ImmichClient(settings)
+    metrics = MetricsRegistry(connected_device_ttl_seconds=settings.ssdp_max_age)
+    immich_client = ImmichClient(settings, metrics=metrics)
     catalog = ContentCatalog(settings=settings, immich_client=immich_client)
     content_directory = ContentDirectoryService(catalog=catalog)
     connection_manager = ConnectionManagerService()
-    ssdp_server = SsdpServer(settings)
-    app = create_app(settings, content_directory, connection_manager, immich_client)
+    ssdp_server = SsdpServer(settings, metrics=metrics)
+    app = create_app(settings, content_directory, connection_manager, immich_client, metrics)
 
     async def on_startup(_app: web.Application) -> None:
         await immich_client.start()

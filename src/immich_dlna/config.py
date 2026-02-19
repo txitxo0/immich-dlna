@@ -119,7 +119,7 @@ class Settings:
             ssdp_notify_interval=ssdp_notify_interval,
             immich_url=_normalize_immich_url(_read_required_str("IMMICH_URL")),
             immich_api_token=_read_required_str("IMMICH_API_TOKEN"),
-            immich_verify_ssl=_read_bool("IMMICH_VERIFY_SSL", False),
+            immich_verify_ssl=_read_bool("IMMICH_VERIFY_SSL", True),
             immich_timeout_seconds=immich_timeout_seconds,
             metadata_cache_ttl_seconds=metadata_cache_ttl_seconds,
         )

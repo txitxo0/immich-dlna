@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import aiohttp
 from aiohttp import web
@@ -12,6 +13,7 @@ from immich_dlna.dlna.device_description import build_device_description
 from immich_dlna.dlna.scpd import CONNECTION_MANAGER_SCPD, CONTENT_DIRECTORY_SCPD
 from immich_dlna.dlna.soap import extract_action_from_soap_header, parse_action_request
 from immich_dlna.immich import ImmichClient, ImmichError
+from immich_dlna.metrics import MetricsRegistry
 
 
 def _soap_response(status_code: int, payload: str) -> web.Response:
@@ -23,8 +25,40 @@ def create_app(
     content_directory_service: ContentDirectoryService,
     connection_manager_service: ConnectionManagerService,
     immich_client: ImmichClient,
+    metrics: MetricsRegistry,
 ) -> web.Application:
-    app = web.Application()
+    @web.middleware
+    async def request_metrics_middleware(
+        request: web.Request,
+        handler: web.Handler,
+    ) -> web.StreamResponse:
+        started_at = time.perf_counter()
+        status = 500
+        try:
+            response = await handler(request)
+            status = response.status
+            return response
+        except web.HTTPException as error:
+            status = error.status
+            raise
+        finally:
+            route = request.path
+            route_info = request.match_info.route
+            if route_info is not None:
+                resource = getattr(route_info, "resource", None)
+                canonical = getattr(resource, "canonical", None)
+                if canonical:
+                    route = canonical
+            metrics.observe_request(
+                method=request.method,
+                route=route,
+                status=status,
+                duration_seconds=time.perf_counter() - started_at,
+            )
+            if status >= 500:
+                metrics.increment_error("server")
+
+    app = web.Application(middlewares=[request_metrics_middleware])
     logger = logging.getLogger("immich_dlna.http")
 
     async def _stream_upstream_response(
@@ -67,7 +101,14 @@ def create_app(
         return response
 
     async def health(_request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "phase": 2})
+        return web.json_response({"status": "ok", "phase": 3})
+
+    async def metrics_endpoint(_request: web.Request) -> web.Response:
+        payload = metrics.render_prometheus(cache_hit_ratio=immich_client.cache_hit_ratio())
+        return web.Response(
+            body=payload,
+            headers={"Content-Type": metrics.content_type},
+        )
 
     async def device_xml(request: web.Request) -> web.Response:
         logger.info("Device description requested remote=%s", request.remote)
@@ -185,6 +226,7 @@ def create_app(
         )
 
     app.router.add_get("/health", health)
+    app.router.add_get("/metrics", metrics_endpoint)
     app.router.add_get("/device.xml", device_xml)
     app.router.add_get("/ContentDirectory/scpd.xml", content_directory_scpd)
     app.router.add_post("/ContentDirectory/control", content_directory_control)

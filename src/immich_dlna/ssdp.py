@@ -8,6 +8,7 @@ import socket
 from urllib.parse import urlsplit
 
 from immich_dlna.config import Settings
+from immich_dlna.metrics import MetricsRegistry
 
 MEDIA_SERVER_DEVICE_TYPE = "urn:schemas-upnp-org:device:MediaServer:1"
 CONTENT_DIRECTORY_SERVICE_TYPE = "urn:schemas-upnp-org:service:ContentDirectory:1"
@@ -32,8 +33,9 @@ class _SsdpProtocol(asyncio.DatagramProtocol):
 
 
 class SsdpServer:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, metrics: MetricsRegistry) -> None:
         self.settings = settings
+        self.metrics = metrics
         self.logger = logging.getLogger("immich_dlna.ssdp")
         self._transport: asyncio.DatagramTransport | None = None
         self._notify_task: asyncio.Task[None] | None = None
@@ -125,6 +127,7 @@ class SsdpServer:
             return
 
         self.logger.info("M-SEARCH received from %s st=%s", addr[0], search_target)
+        self.metrics.mark_device_seen(addr[0])
         location = self._location_for_destination(addr[0])
 
         if search_target == "ssdp:all":

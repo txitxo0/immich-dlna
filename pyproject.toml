@@ -7,7 +7,7 @@ name = "immich-dlna"
 version = "0.1.0"
 description = "DLNA/UPnP MediaServer skeleton for Immich"
 requires-python = ">=3.11"
-dependencies = ["aiohttp>=3.10,<4"]
+dependencies = ["aiohttp>=3.10,<4", "prometheus-client>=0.20,<1"]
 
 [project.scripts]
 immich-dlna = "immich_dlna.__main__:main"
