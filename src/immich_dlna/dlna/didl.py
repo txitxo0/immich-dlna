@@ -57,6 +57,9 @@ def render_entries(entries: list[BrowseEntry]) -> str:
         title.text = entry.title
         upnp_class = ET.SubElement(item, f"{{{UPNP_NS}}}class")
         upnp_class.text = entry.upnp_class
+        if entry.thumbnail_url:
+            album_art = ET.SubElement(item, f"{{{UPNP_NS}}}albumArtURI")
+            album_art.text = entry.thumbnail_url
         resource = ET.SubElement(item, f"{{{DIDL_NS}}}res", {"protocolInfo": _protocol_info(entry)})
         resource.text = entry.resource_url
     return ET.tostring(root, encoding="unicode")

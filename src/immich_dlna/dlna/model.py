@@ -28,6 +28,7 @@ class MediaItem:
     title: str
     upnp_class: str
     resource_url: str
+    thumbnail_url: str | None
     mime_type: str
     is_video: bool
 

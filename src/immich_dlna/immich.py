@@ -217,6 +217,26 @@ class ImmichClient:
             raise ImmichError(f"Immich stream {path} failed: {response.status} {details}")
         return asset, response
 
+    async def open_asset_thumbnail_stream(self, asset_id: str) -> aiohttp.ClientResponse:
+        session = self._session
+        if session is None:
+            raise RuntimeError("Immich client not started.")
+
+        headers = {
+            "x-api-key": self.settings.immich_api_token,
+            "Accept": "image/jpeg,image/*;q=0.9,*/*;q=0.1",
+        }
+        url = f"{self.settings.immich_url}/assets/{asset_id}/thumbnail"
+        try:
+            response = await session.get(url, headers=headers, params={"size": "preview"}, ssl=self._ssl)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            raise ImmichError(f"Immich thumbnail request failed: {error}") from error
+        if response.status >= 400:
+            details = (await response.text())[:250]
+            response.release()
+            raise ImmichError(f"Immich thumbnail failed: {response.status} {details}")
+        return response
+
     @staticmethod
     def _parse_asset(payload: dict[str, Any], fallback_is_image: bool | None = None) -> ImmichAsset:
         asset_id = str(payload.get("id", ""))

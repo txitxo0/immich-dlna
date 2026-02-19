@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import aiohttp
 from aiohttp import web
 
 from immich_dlna.config import Settings
@@ -25,6 +26,45 @@ def create_app(
 ) -> web.Application:
     app = web.Application()
     logger = logging.getLogger("immich_dlna.http")
+
+    async def _stream_upstream_response(
+        request: web.Request,
+        upstream: aiohttp.ClientResponse,
+        default_content_type: str | None = None,
+    ) -> web.StreamResponse:
+        passthrough_headers = {}
+        for header_name in (
+            "Content-Type",
+            "Content-Length",
+            "Content-Range",
+            "Accept-Ranges",
+            "ETag",
+            "Last-Modified",
+            "Cache-Control",
+        ):
+            value = upstream.headers.get(header_name)
+            if value:
+                passthrough_headers[header_name] = value
+
+        if default_content_type and "Content-Type" not in passthrough_headers:
+            passthrough_headers["Content-Type"] = default_content_type
+
+        response = web.StreamResponse(status=upstream.status, headers=passthrough_headers)
+        await response.prepare(request)
+
+        try:
+            async for chunk in upstream.content.iter_chunked(64 * 1024):
+                await response.write(chunk)
+        except (ConnectionResetError, RuntimeError) as error:
+            logger.warning("Client disconnected during upstream stream: %s", error)
+        finally:
+            upstream.release()
+
+        try:
+            await response.write_eof()
+        except (ConnectionResetError, RuntimeError):
+            pass
+        return response
 
     async def health(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "phase": 2})
@@ -95,39 +135,54 @@ def create_app(
             logger.error("Media proxy failed before stream asset_id=%s error=%s", asset_id, error)
             return web.Response(status=502, text="Failed to fetch media from Immich.")
 
-        passthrough_headers = {}
-        for header_name in (
-            "Content-Type",
-            "Content-Length",
-            "Content-Range",
-            "Accept-Ranges",
-            "ETag",
-            "Last-Modified",
-            "Cache-Control",
-        ):
-            value = upstream.headers.get(header_name)
-            if value:
-                passthrough_headers[header_name] = value
+        return await _stream_upstream_response(
+            request=request,
+            upstream=upstream,
+            default_content_type=asset.original_mime_type,
+        )
 
-        if "Content-Type" not in passthrough_headers:
-            passthrough_headers["Content-Type"] = asset.original_mime_type
-
-        response = web.StreamResponse(status=upstream.status, headers=passthrough_headers)
-        await response.prepare(request)
-
+    async def media_asset_thumbnail(request: web.Request) -> web.StreamResponse:
+        asset_id = request.match_info.get("asset_id", "")
+        logger.info("Thumbnail proxy request asset_id=%s remote=%s", asset_id, request.remote)
         try:
-            async for chunk in upstream.content.iter_chunked(64 * 1024):
-                await response.write(chunk)
-        except (ConnectionResetError, RuntimeError) as error:
-            logger.warning("Client disconnected during stream asset_id=%s error=%s", asset_id, error)
-        finally:
+            upstream = await immich_client.open_asset_thumbnail_stream(asset_id)
+        except ImmichError as error:
+            logger.error("Thumbnail proxy failed asset_id=%s error=%s", asset_id, error)
+            return web.Response(status=502, text="Failed to fetch thumbnail from Immich.")
+
+        content_type = (upstream.headers.get("Content-Type") or "").lower()
+        logger.info(
+            "Thumbnail upstream response asset_id=%s status=%s content_type=%s",
+            asset_id,
+            upstream.status,
+            content_type or "<missing>",
+        )
+        if not content_type.startswith("image/") or content_type.startswith("image/webp"):
             upstream.release()
+            try:
+                asset, fallback_stream = await immich_client.open_asset_stream(asset_id, None)
+            except ImmichError as error:
+                logger.error("Thumbnail fallback failed asset_id=%s error=%s", asset_id, error)
+                return web.Response(status=502, text="Failed to fetch thumbnail fallback.")
+            if asset.is_video:
+                fallback_stream.release()
+                return web.Response(status=204)
+            logger.info(
+                "Thumbnail fallback to original asset stream asset_id=%s content_type=%s",
+                asset_id,
+                fallback_stream.headers.get("Content-Type", "<missing>"),
+            )
+            return await _stream_upstream_response(
+                request=request,
+                upstream=fallback_stream,
+                default_content_type=asset.original_mime_type,
+            )
 
-        try:
-            await response.write_eof()
-        except (ConnectionResetError, RuntimeError):
-            pass
-        return response
+        return await _stream_upstream_response(
+            request=request,
+            upstream=upstream,
+            default_content_type="image/jpeg",
+        )
 
     app.router.add_get("/health", health)
     app.router.add_get("/device.xml", device_xml)
@@ -138,4 +193,5 @@ def create_app(
     app.router.add_post("/ConnectionManager/control", connection_manager_control)
     app.router.add_route("*", "/ConnectionManager/event", event_subscription)
     app.router.add_get("/media/asset/{asset_id}", media_asset)
+    app.router.add_get("/media/asset/{asset_id}/thumbnail", media_asset_thumbnail)
     return app

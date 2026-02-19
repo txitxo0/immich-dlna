@@ -156,6 +156,7 @@ class ContentCatalog:
             title=asset.title,
             upnp_class=VIDEO_CLASS if asset.is_video else IMAGE_CLASS,
             resource_url=f"{self.settings.base_url}/media/asset/{asset.asset_id}",
+            thumbnail_url=f"{self.settings.base_url}/media/asset/{asset.asset_id}/thumbnail",
             mime_type=asset.original_mime_type or "application/octet-stream",
             is_video=asset.is_video,
         )
