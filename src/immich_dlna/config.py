@@ -83,6 +83,7 @@ class Settings:
     immich_api_token: str
     immich_verify_ssl: bool
     immich_timeout_seconds: int
+    immich_stream_read_timeout_seconds: int
     metadata_cache_ttl_seconds: int
     metadata_cache_max_entries: int
     immich_max_concurrent_requests: int
@@ -93,6 +94,10 @@ class Settings:
         ssdp_max_age = _read_int("IMMICH_DLNA_SSDP_MAX_AGE", 1800)
         ssdp_notify_interval = _read_int("IMMICH_DLNA_SSDP_NOTIFY_INTERVAL", 900)
         immich_timeout_seconds = _read_int("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS", 20)
+        immich_stream_read_timeout_seconds = _read_int(
+            "IMMICH_DLNA_IMMICH_STREAM_READ_TIMEOUT_SECONDS",
+            300,
+        )
         metadata_cache_ttl_seconds = _read_int("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS", 30)
         metadata_cache_max_entries = _read_int("IMMICH_DLNA_METADATA_CACHE_MAX_ENTRIES", 2000)
         immich_max_concurrent_requests = _read_int("IMMICH_DLNA_IMMICH_MAX_CONCURRENT_REQUESTS", 16)
@@ -107,6 +112,8 @@ class Settings:
             )
         if immich_timeout_seconds <= 0:
             raise ValueError("IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS must be > 0.")
+        if immich_stream_read_timeout_seconds <= 0:
+            raise ValueError("IMMICH_DLNA_IMMICH_STREAM_READ_TIMEOUT_SECONDS must be > 0.")
         if metadata_cache_ttl_seconds <= 0:
             raise ValueError("IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS must be > 0.")
         if metadata_cache_max_entries <= 0:
@@ -129,6 +136,7 @@ class Settings:
             immich_api_token=_read_required_str("IMMICH_API_TOKEN"),
             immich_verify_ssl=_read_bool("IMMICH_VERIFY_SSL", True),
             immich_timeout_seconds=immich_timeout_seconds,
+            immich_stream_read_timeout_seconds=immich_stream_read_timeout_seconds,
             metadata_cache_ttl_seconds=metadata_cache_ttl_seconds,
             metadata_cache_max_entries=metadata_cache_max_entries,
             immich_max_concurrent_requests=immich_max_concurrent_requests,

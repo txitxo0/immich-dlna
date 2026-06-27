@@ -38,9 +38,12 @@ Environment variables:
 | `IMMICH_DLNA_SSDP_MAX_AGE` | `1800` | No | SSDP cache lifetime in seconds. |
 | `IMMICH_DLNA_SSDP_NOTIFY_INTERVAL` | `900` | No | Interval for SSDP alive announcements in seconds. |
 | `IMMICH_DLNA_IMMICH_TIMEOUT_SECONDS` | `20` | No | Timeout for upstream Immich HTTP calls. |
+| `IMMICH_DLNA_IMMICH_STREAM_READ_TIMEOUT_SECONDS` | `300` | No | Idle read timeout for upstream media/thumbnail streams; overall stream duration is not capped by this setting. |
 | `IMMICH_DLNA_IMMICH_MAX_CONCURRENT_REQUESTS` | `16` | No | Max concurrent upstream Immich requests. |
 | `IMMICH_DLNA_METADATA_CACHE_TTL_SECONDS` | `30` | No | TTL for metadata cache entries. |
 | `IMMICH_DLNA_METADATA_CACHE_MAX_ENTRIES` | `2000` | No | Max metadata cache entries (bounded LRU cache). |
+
+Immich-DLNA keeps connection pooling enabled for normal upstream performance, but retries metadata/media GET requests after reconnect-worthy transport failures and refreshes the affected upstream session so later requests do not stay pinned to stale pooled sockets.
 
 ## Local run (with uv)
 

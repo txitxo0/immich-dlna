@@ -93,6 +93,7 @@ def create_app(
             logger.warning("Client disconnected during upstream stream: %s", error)
         finally:
             upstream.release()
+            await immich_client.cleanup_retired_sessions()
 
         try:
             await response.write_eof()
@@ -200,6 +201,7 @@ def create_app(
         )
         if not content_type.startswith("image/") or content_type.startswith("image/webp"):
             upstream.release()
+            await immich_client.cleanup_retired_sessions()
             try:
                 asset, fallback_stream = await immich_client.open_asset_stream(asset_id, None)
             except ImmichError as error:
@@ -207,6 +209,7 @@ def create_app(
                 return web.Response(status=502, text="Failed to fetch thumbnail fallback.")
             if asset.is_video:
                 fallback_stream.release()
+                await immich_client.cleanup_retired_sessions()
                 return web.Response(status=204)
             logger.info(
                 "Thumbnail fallback to original asset stream asset_id=%s content_type=%s",

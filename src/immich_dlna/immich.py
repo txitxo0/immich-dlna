@@ -21,6 +21,7 @@ class ImmichError(RuntimeError):
 _UUID_IN_PATH = re.compile(
     r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?=/|$)"
 )
+_RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,11 @@ class ImmichClient:
         self.settings = settings
         self.metrics = metrics
         self.logger = logging.getLogger("immich_dlna.immich")
-        self._session: aiohttp.ClientSession | None = None
+        self._json_session: aiohttp.ClientSession | None = None
+        self._retired_json_sessions: list[aiohttp.ClientSession] = []
+        self._stream_session: aiohttp.ClientSession | None = None
+        self._retired_stream_sessions: list[aiohttp.ClientSession] = []
+        self._session_lock = asyncio.Lock()
         self._asset_cache = TtlCache[ImmichAsset](
             settings.metadata_cache_ttl_seconds,
             settings.metadata_cache_max_entries,
@@ -63,28 +68,131 @@ class ImmichClient:
             settings.metadata_cache_max_entries,
         )
         self._ssl: bool | None = None if settings.immich_verify_ssl else False
+        self._json_timeout = aiohttp.ClientTimeout(total=self.settings.immich_timeout_seconds)
+        self._stream_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=self.settings.immich_timeout_seconds,
+            sock_connect=self.settings.immich_timeout_seconds,
+            sock_read=self.settings.immich_stream_read_timeout_seconds,
+        )
 
     async def start(self) -> None:
-        if self._session is not None:
-            return
-        timeout = aiohttp.ClientTimeout(total=self.settings.immich_timeout_seconds)
-        connector = aiohttp.TCPConnector(
-            limit=self.settings.immich_max_concurrent_requests,
-            limit_per_host=self.settings.immich_max_concurrent_requests,
-        )
-        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        await self._get_json_session()
+        await self._get_stream_session()
         self.logger.info(
-            "Immich client started url=%s verify_ssl=%s max_concurrent_requests=%s",
+            "Immich client started url=%s verify_ssl=%s max_concurrent_requests=%s stream_read_timeout=%s",
             self.settings.immich_url,
             self.settings.immich_verify_ssl,
             self.settings.immich_max_concurrent_requests,
+            self.settings.immich_stream_read_timeout_seconds,
         )
 
     async def close(self) -> None:
-        if self._session is None:
-            return
-        await self._session.close()
-        self._session = None
+        async with self._session_lock:
+            sessions = [session for session in (self._json_session, self._stream_session) if session is not None]
+            sessions.extend(self._retired_json_sessions)
+            sessions.extend(self._retired_stream_sessions)
+            self._json_session = None
+            self._retired_json_sessions = []
+            self._stream_session = None
+            self._retired_stream_sessions = []
+
+        for session in sessions:
+            await session.close()
+
+    def _create_connector(self) -> aiohttp.TCPConnector:
+        return aiohttp.TCPConnector(
+            limit=self.settings.immich_max_concurrent_requests,
+            limit_per_host=self.settings.immich_max_concurrent_requests,
+            enable_cleanup_closed=True,
+        )
+
+    def _create_session(self, timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(timeout=timeout, connector=self._create_connector())
+
+    async def _get_json_session(self) -> aiohttp.ClientSession:
+        session = self._json_session
+        if session is not None and not session.closed:
+            return session
+        async with self._session_lock:
+            session = self._json_session
+            if session is None or session.closed:
+                session = self._create_session(self._json_timeout)
+                self._json_session = session
+            return session
+
+    async def _get_stream_session(self) -> aiohttp.ClientSession:
+        session = self._stream_session
+        if session is not None and not session.closed:
+            return session
+        async with self._session_lock:
+            session = self._stream_session
+            if session is None or session.closed:
+                session = self._create_session(self._stream_timeout)
+                self._stream_session = session
+            return session
+
+    async def _reset_json_session(self, reason: str) -> None:
+        new_session = self._create_session(self._json_timeout)
+        async with self._session_lock:
+            previous_session = self._json_session
+            self._json_session = new_session
+            if previous_session is not None:
+                self._retired_json_sessions.append(previous_session)
+        await self.cleanup_retired_sessions()
+        self.logger.warning("Reset Immich JSON session reason=%s", reason)
+
+    async def _reset_stream_session(self, reason: str) -> None:
+        new_session = self._create_session(self._stream_timeout)
+        async with self._session_lock:
+            previous_session = self._stream_session
+            self._stream_session = new_session
+            if previous_session is not None:
+                self._retired_stream_sessions.append(previous_session)
+        await self.cleanup_retired_sessions()
+        self.logger.warning("Reset Immich stream session reason=%s", reason)
+
+    @staticmethod
+    def _split_closeable_retired_sessions(
+        sessions: list[aiohttp.ClientSession],
+    ) -> tuple[list[aiohttp.ClientSession], list[aiohttp.ClientSession]]:
+        sessions_to_close: list[aiohttp.ClientSession] = []
+        still_retired: list[aiohttp.ClientSession] = []
+        for session in sessions:
+            connector = session.connector
+            if session.closed or connector is None or not getattr(connector, "_acquired", ()):
+                sessions_to_close.append(session)
+            else:
+                still_retired.append(session)
+        return sessions_to_close, still_retired
+
+    async def cleanup_retired_sessions(self) -> None:
+        async with self._session_lock:
+            json_to_close, self._retired_json_sessions = self._split_closeable_retired_sessions(
+                self._retired_json_sessions
+            )
+            stream_to_close, self._retired_stream_sessions = self._split_closeable_retired_sessions(
+                self._retired_stream_sessions
+            )
+
+        for session in [*json_to_close, *stream_to_close]:
+            await session.close()
+
+    @staticmethod
+    def _is_reconnect_worthy_error(error: BaseException) -> bool:
+        return isinstance(
+            error,
+            (
+                asyncio.TimeoutError,
+                aiohttp.ClientConnectionError,
+                aiohttp.ServerDisconnectedError,
+                aiohttp.ServerTimeoutError,
+            ),
+        )
+
+    @staticmethod
+    def _is_retryable_status(status: int) -> bool:
+        return status in _RETRYABLE_STATUS_CODES
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -132,12 +240,10 @@ class ImmichClient:
         params: dict[str, str] | None = None,
         retries: int = 1,
     ) -> Any:
-        session = self._session
-        if session is None:
-            raise RuntimeError("Immich client not started.")
         url = f"{self.settings.immich_url}{path}"
         attempt = 0
         while True:
+            session = await self._get_json_session()
             started_at = time.perf_counter()
             try:
                 async with session.get(url, headers=self._headers(), params=params, ssl=self._ssl) as response:
@@ -145,6 +251,11 @@ class ImmichClient:
                         details = (await response.text())[:250]
                         self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
                         self._record_immich_error()
+                        if self._is_retryable_status(response.status) and attempt < retries:
+                            attempt += 1
+                            await self._reset_json_session(f"http_{response.status}:{path}")
+                            await asyncio.sleep(0.2 * attempt)
+                            continue
                         raise ImmichError(f"Immich GET {path} failed: {response.status} {details}")
                     content_type = response.headers.get("Content-Type", "")
                     if "json" not in content_type.lower():
@@ -164,12 +275,64 @@ class ImmichClient:
                 if attempt >= retries:
                     raise ImmichError(str(error)) from error
                 attempt += 1
+                if self._is_reconnect_worthy_error(error):
+                    await self._reset_json_session(f"{type(error).__name__}:{path}")
                 await asyncio.sleep(0.2 * attempt)
             except ImmichError as error:
                 if attempt >= retries:
                     raise ImmichError(str(error)) from error
                 attempt += 1
                 await asyncio.sleep(0.2 * attempt)
+            finally:
+                await self.cleanup_retired_sessions()
+
+    async def _request_stream(
+        self,
+        path: str,
+        headers: dict[str, str],
+        *,
+        params: dict[str, str] | None = None,
+        retries: int = 1,
+    ) -> aiohttp.ClientResponse:
+        url = f"{self.settings.immich_url}{path}"
+        attempt = 0
+        while True:
+            session = await self._get_stream_session()
+            started_at = time.perf_counter()
+            try:
+                response = await session.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    ssl=self._ssl,
+                    timeout=self._stream_timeout,
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                self._observe_outgoing(path, "error", time.perf_counter() - started_at)
+                self._record_immich_error()
+                if attempt >= retries:
+                    raise ImmichError(f"Immich stream request failed: {error}") from error
+                attempt += 1
+                if self._is_reconnect_worthy_error(error):
+                    await self._reset_stream_session(f"{type(error).__name__}:{path}")
+                await asyncio.sleep(0.2 * attempt)
+                continue
+            finally:
+                await self.cleanup_retired_sessions()
+
+            self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
+            if response.status < 400:
+                return response
+
+            details = (await response.text())[:250]
+            response.release()
+            self._record_immich_error()
+            if self._is_retryable_status(response.status) and attempt < retries:
+                attempt += 1
+                await self._reset_stream_session(f"http_{response.status}:{path}")
+                await asyncio.sleep(0.2 * attempt)
+                continue
+            raise ImmichError(f"Immich stream {path} failed: {response.status} {details}")
 
     async def list_albums(self) -> list[ImmichAlbum]:
         cached = self._album_list_cache.get("albums")
@@ -270,10 +433,6 @@ class ImmichClient:
         asset_id: str,
         range_header: str | None,
     ) -> tuple[ImmichAsset, aiohttp.ClientResponse]:
-        session = self._session
-        if session is None:
-            raise RuntimeError("Immich client not started.")
-
         asset = await self.get_asset_info(asset_id)
         if asset.is_video:
             path = f"/assets/{asset_id}/video/playback"
@@ -284,46 +443,19 @@ class ImmichClient:
         if range_header:
             headers["Range"] = range_header
 
-        url = f"{self.settings.immich_url}{path}"
-        started_at = time.perf_counter()
-        try:
-            response = await session.get(url, headers=headers, ssl=self._ssl)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            self._observe_outgoing(path, "error", time.perf_counter() - started_at)
-            self._record_immich_error()
-            raise ImmichError(f"Immich stream request failed: {error}") from error
-        self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
-        if response.status >= 400:
-            details = (await response.text())[:250]
-            response.release()
-            self._record_immich_error()
-            raise ImmichError(f"Immich stream {path} failed: {response.status} {details}")
+        response = await self._request_stream(path, headers)
         return asset, response
 
     async def open_asset_thumbnail_stream(self, asset_id: str) -> aiohttp.ClientResponse:
-        session = self._session
-        if session is None:
-            raise RuntimeError("Immich client not started.")
-
         headers = {
             "x-api-key": self.settings.immich_api_token,
             "Accept": "image/jpeg,image/*;q=0.9,*/*;q=0.1",
         }
-        url = f"{self.settings.immich_url}/assets/{asset_id}/thumbnail"
-        started_at = time.perf_counter()
-        try:
-            response = await session.get(url, headers=headers, params={"size": "preview"}, ssl=self._ssl)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            self._observe_outgoing("/assets/{id}/thumbnail", "error", time.perf_counter() - started_at)
-            self._record_immich_error()
-            raise ImmichError(f"Immich thumbnail request failed: {error}") from error
-        self._observe_outgoing("/assets/{id}/thumbnail", str(response.status), time.perf_counter() - started_at)
-        if response.status >= 400:
-            details = (await response.text())[:250]
-            response.release()
-            self._record_immich_error()
-            raise ImmichError(f"Immich thumbnail failed: {response.status} {details}")
-        return response
+        return await self._request_stream(
+            f"/assets/{asset_id}/thumbnail",
+            headers,
+            params={"size": "preview"},
+        )
 
     @staticmethod
     def _parse_asset(payload: dict[str, Any], fallback_is_image: bool | None = None) -> ImmichAsset:
