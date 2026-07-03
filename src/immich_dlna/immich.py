@@ -22,6 +22,7 @@ _UUID_IN_PATH = re.compile(
     r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?=/|$)"
 )
 _RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
+_METADATA_SEARCH_PAGE_SIZE = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,11 +206,11 @@ class ImmichClient:
         normalized = _UUID_IN_PATH.sub("/{id}", path)
         return normalized or "/"
 
-    def _observe_outgoing(self, path: str, status: str, duration_seconds: float) -> None:
+    def _observe_outgoing(self, method: str, path: str, status: str, duration_seconds: float) -> None:
         if self.metrics is None:
             return
         self.metrics.observe_outgoing(
-            method="GET",
+            method=method,
             target=self._metric_target(path),
             status=status,
             duration_seconds=duration_seconds,
@@ -237,7 +238,10 @@ class ImmichClient:
     async def _request_json(
         self,
         path: str,
+        *,
+        method: str = "GET",
         params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
         retries: int = 1,
     ) -> Any:
         url = f"{self.settings.immich_url}{path}"
@@ -246,31 +250,38 @@ class ImmichClient:
             session = await self._get_json_session()
             started_at = time.perf_counter()
             try:
-                async with session.get(url, headers=self._headers(), params=params, ssl=self._ssl) as response:
+                async with session.request(
+                    method,
+                    url,
+                    headers=self._headers(),
+                    params=params,
+                    json=json_body,
+                    ssl=self._ssl,
+                ) as response:
                     if response.status >= 400:
                         details = (await response.text())[:250]
-                        self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
+                        self._observe_outgoing(method, path, str(response.status), time.perf_counter() - started_at)
                         self._record_immich_error()
                         if self._is_retryable_status(response.status) and attempt < retries:
                             attempt += 1
                             await self._reset_json_session(f"http_{response.status}:{path}")
                             await asyncio.sleep(0.2 * attempt)
                             continue
-                        raise ImmichError(f"Immich GET {path} failed: {response.status} {details}")
+                        raise ImmichError(f"Immich {method} {path} failed: {response.status} {details}")
                     content_type = response.headers.get("Content-Type", "")
                     if "json" not in content_type.lower():
                         details = (await response.text())[:250]
-                        self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
+                        self._observe_outgoing(method, path, str(response.status), time.perf_counter() - started_at)
                         self._record_immich_error()
                         raise ImmichError(
-                            f"Immich GET {path} returned non-JSON content type ({content_type}). "
+                            f"Immich {method} {path} returned non-JSON content type ({content_type}). "
                             f"Check IMMICH_URL points to Immich API (usually with /api). Response: {details}"
                         )
                     payload = await response.json()
-                    self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
+                    self._observe_outgoing(method, path, str(response.status), time.perf_counter() - started_at)
                     return payload
             except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                self._observe_outgoing(path, "error", time.perf_counter() - started_at)
+                self._observe_outgoing(method, path, "error", time.perf_counter() - started_at)
                 self._record_immich_error()
                 if attempt >= retries:
                     raise ImmichError(str(error)) from error
@@ -308,7 +319,7 @@ class ImmichClient:
                     timeout=self._stream_timeout,
                 )
             except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                self._observe_outgoing(path, "error", time.perf_counter() - started_at)
+                self._observe_outgoing("GET", path, "error", time.perf_counter() - started_at)
                 self._record_immich_error()
                 if attempt >= retries:
                     raise ImmichError(f"Immich stream request failed: {error}") from error
@@ -320,7 +331,7 @@ class ImmichClient:
             finally:
                 await self.cleanup_retired_sessions()
 
-            self._observe_outgoing(path, str(response.status), time.perf_counter() - started_at)
+            self._observe_outgoing("GET", path, str(response.status), time.perf_counter() - started_at)
             if response.status < 400:
                 return response
 
@@ -339,8 +350,8 @@ class ImmichClient:
         if cached is not None:
             return cached
 
-        owned_payload = await self._request_json("/albums")
-        shared_payload = await self._request_json("/albums", params={"shared": "true"})
+        owned_payload = await self._request_json("/albums", params={"isOwned": "true"})
+        shared_payload = await self._request_json("/albums", params={"isShared": "true"})
 
         albums_by_id: dict[str, ImmichAlbum] = {}
         for payload in (owned_payload, shared_payload):
@@ -364,12 +375,57 @@ class ImmichClient:
         if cached is not None and not sort_criteria:
             return cached
 
-        payload = await self._request_json(f"/albums/{album_id}", params={"withoutAssets": "false"})
-        assets_payload = payload.get("assets", [])
-        assets = [self._parse_asset(asset_payload) for asset_payload in assets_payload]
+        payload = await self._request_json(f"/albums/{album_id}")
+        if int(payload.get("assetCount") or 0) == 0:
+            if not sort_criteria:
+                self._album_assets_cache.set(cache_key, [])
+            return []
+
         album_order = str(payload.get("order", "")).strip().lower()
+        search_request: dict[str, Any] = {
+            "albumIds": [album_id],
+            "size": _METADATA_SEARCH_PAGE_SIZE,
+        }
         if not sort_criteria and album_order in {"asc", "desc"}:
-            assets.sort(key=lambda asset: asset.created_at, reverse=album_order == "desc")
+            search_request["order"] = album_order
+
+        assets: list[ImmichAsset] = []
+        next_page: int | None = None
+        while True:
+            page_request = dict(search_request)
+            if next_page is not None:
+                page_request["page"] = next_page
+
+            search_payload = await self._request_json(
+                "/search/metadata",
+                method="POST",
+                json_body=page_request,
+            )
+            search_assets_payload = search_payload.get("assets", {})
+            items_payload = search_assets_payload.get("items", [])
+            page_assets = [self._parse_asset(asset_payload) for asset_payload in items_payload]
+            if not page_assets:
+                break
+            assets.extend(page_assets)
+
+            next_page_token = search_assets_payload.get("nextPage")
+            if next_page_token is None:
+                break
+
+            try:
+                parsed_next_page = int(next_page_token)
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Stopping album pagination for album_id=%s due to unsupported nextPage token=%r",
+                    album_id,
+                    next_page_token,
+                )
+                break
+
+            if parsed_next_page <= 0 or parsed_next_page == next_page:
+                break
+            next_page = parsed_next_page
+
         for asset in assets:
             self._asset_cache.set(f"asset:{asset.asset_id}", asset)
         if not sort_criteria:

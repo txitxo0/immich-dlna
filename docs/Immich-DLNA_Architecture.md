@@ -90,8 +90,10 @@ Source of truth: `docs/immich-openapi-specs.json`.
   - `GET /timeline/buckets?order=desc&visibility=timeline&isTrashed=false`
   - `GET /timeline/bucket?timeBucket=YYYY-MM-DD&order=desc&visibility=timeline&isTrashed=false`
 - **Albums:**
-  - `GET /albums`
-  - `GET /albums/{id}?withoutAssets=false`
+  - `GET /albums?isOwned=true`
+  - `GET /albums?isShared=true`
+  - `GET /albums/{id}`
+  - `POST /search/metadata` with `albumIds=[...]` to fetch album assets
 - **Assets:**
   - Metadata: `GET /assets/{id}`
   - Thumbnail: `GET /assets/{id}/thumbnail?size=thumbnail|preview`

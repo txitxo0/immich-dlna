@@ -2,6 +2,7 @@
 
 Immich-DLNA exposes your Immich photo/video library as a DLNA/UPnP Media Server so TVs and other DLNA clients can browse and play content.
 The navigation mirrors Immich’s familiar structure: **Timeline** and **Albums**, including shared/partner content where available.
+The current implementation is compatible with the Immich v3 album API.
 
 ## DLNA container structure
 
